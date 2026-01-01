@@ -1,0 +1,49 @@
+name: Borsa Hacim Botu
+
+on:
+  schedule:
+    - cron: '*/5 * * * *' # Her 5 dakikada bir çalışır
+  workflow_dispatch: # Manuel başlatma butonu
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    
+    # Hafızanın (Cache) bozulmaması için izinleri veriyoruz
+    permissions:
+      contents: write
+
+    steps:
+      - name: Kodu Klonla
+        uses: actions/checkout@v3
+
+      - name: Hafizayi Yukle (Cache)
+        uses: actions/cache@v3
+        with:
+          path: sent_coins.txt
+          # Her gün için yeni bir cache anahtarı oluşturur
+          key: volume-memory-${{ github.run_id }}
+          restore-keys: |
+            volume-memory-
+
+      - name: Python Kurulumu
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Kütüphaneleri Yükle
+        run: |
+          pip install requests
+
+      - name: Botu Calistir
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bot.py
+
+      - name: Hafizayi Güncelle (Kaydet)
+        if: always()
+        uses: actions/cache@v3
+        with:
+          path: sent_coins.txt
+          key: volume-memory-${{ github.run_id }}

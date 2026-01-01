@@ -15,14 +15,13 @@ def send_tg(msg):
     except: pass
 
 def get_indicators(df):
-    """EMA ve MACD hesaplar"""
     try:
         df['close'] = df['close'].astype(float)
         df['vol'] = df['vol'].astype(float)
         
         # EMA 20
         ema20 = df['close'].ewm(span=20, adjust=False).mean()
-        # MACD (12, 26, 9)
+        # MACD
         exp1 = df['close'].ewm(span=12, adjust=False).mean()
         exp2 = df['close'].ewm(span=26, adjust=False).mean()
         macd = exp1 - exp2
@@ -32,35 +31,34 @@ def get_indicators(df):
             'is_above_ema': df['close'].iloc[-1] > ema20.iloc[-1],
             'is_macd_plus': macd.iloc[-1] > signal.iloc[-1],
             'last_vol': df['vol'].iloc[-2],
-            'avg_vol': df['vol'].iloc[-6:-2].mean()
+            'avg_vol': df['vol'].iloc[-6:-2].mean(),
+            'current_price': df['close'].iloc[-1]
         }
-    except:
-        return None
+    except: return None
 
-def analyze_coin(symbol):
+def analyze_okx(symbol):
     try:
-        # 1. SAATLİK VERİ
-        r1h = requests.get(f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=50", timeout=10)
-        res1h = r1h.json()
+        # OKX Mum Verisi Çekme (1h ve 4h)
+        # bar: 1H, 4H
+        url = "https://www.okx.com/api/v5/market/candles"
         
-        # Hata kontrolü: Eğer liste değilse (hata mesajı gelmişse) çık
-        if not isinstance(res1h, list): return False, 0
-        
-        df1h = pd.DataFrame(res1h, columns=['time', 'open', 'high', 'low', 'close', 'vol', 'close_time', 'q_vol', 'trades', 'tbb', 'tbq', 'ignore'])
-        ind1h = get_indicators(df1h)
-        
-        # 2. 4 SAATLİK VERİ
-        r4h = requests.get(f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=4h&limit=50", timeout=10)
-        res4h = r4h.json()
-        
-        if not isinstance(res4h, list): return False, 0
-        
-        df4h = pd.DataFrame(res4h, columns=['time', 'open', 'high', 'low', 'close', 'vol', 'close_time', 'q_vol', 'trades', 'tbb', 'tbq', 'ignore'])
-        ind4h = get_indicators(df4h)
+        # 1 Saatlik Analiz
+        r1h = requests.get(f"{url}?instId={symbol}&bar=1H&limit=50", timeout=10).json()
+        if r1h.get('code') != '0': return False, 0
+        df1h = pd.DataFrame(r1h['data'], columns=['ts', 'o', 'h', 'l', 'c', 'vol', 'volCcy', 'volCcyQuote', 'confirm'])
+        df1h = df1h.rename(columns={'c': 'close', 'vol': 'vol'})
+        ind1h = get_indicators(df1h[::-1]) # OKX verisi ters gelir, düzeltiyoruz
+
+        # 4 Saatlik Analiz
+        r4h = requests.get(f"{url}?instId={symbol}&bar=4H&limit=50", timeout=10).json()
+        if r4h.get('code') != '0': return False, 0
+        df4h = pd.DataFrame(r4h['data'], columns=['ts', 'o', 'h', 'l', 'c', 'vol', 'volCcy', 'volCcyQuote', 'confirm'])
+        df4h = df4h.rename(columns={'c': 'close', 'vol': 'vol'})
+        ind4h = get_indicators(df4h[::-1])
 
         if not ind1h or not ind4h: return False, 0
 
-        # ŞARTLAR: %40 hacim artışı + 4S Trend Onayı
+        # KRİTER: 1s Hacim Patlaması (%40) + 4s Pozitif Trend
         volume_spike = ind1h['last_vol'] > (ind1h['avg_vol'] * 1.40)
         trend_ok = ind4h['is_above_ema'] and ind4h['is_macd_plus']
         
@@ -68,18 +66,14 @@ def analyze_coin(symbol):
             spike_pct = int(((ind1h['last_vol'] / ind1h['avg_vol']) - 1) * 100)
             return True, spike_pct
         return False, 0
-    except:
-        return False, 0
+    except: return False, 0
 
 def scan():
     try:
-        # Ana borsa verisini çek
-        r = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
-        tickers = r.json()
-        
-        if not isinstance(tickers, list): 
-            print("Binance'den beklenen liste verisi gelmedi.")
-            return
+        # OKX'te işlem gören USDT çiftlerini çek
+        tickers_url = "https://www.okx.com/api/v5/market/tickers?instType=SPOT"
+        r = requests.get(tickers_url, timeout=10).json()
+        if r.get('code') != '0': return
 
         # Hafıza oku
         sent_today = []
@@ -87,35 +81,36 @@ def scan():
             with open(MEMORY_FILE, "r") as f:
                 sent_today = f.read().splitlines()
 
-        for coin in tickers:
-            # Güvenlik: coin bir dict mi kontrol et
-            if not isinstance(coin, dict): continue
+        for ticker in r['data']:
+            symbol = ticker['instId']
+            if not symbol.endswith('-USDT'): continue
             
-            symbol = coin.get('symbol', '')
-            if not symbol.endswith('USDT'): continue
-            
-            q_vol = float(coin.get('quoteVolume', 0))
-            if q_vol < 5000000: continue
+            # 24s Hacim Filtresi (OKX verisi volCcy24h birimindedir, örn: 2M USDT)
+            vol_24h = float(ticker.get('volCcy24h', 0))
+            if vol_24h < 2000000: continue 
 
             # Hafıza kontrolü
             if any(line.startswith(symbol) and (time.time() - float(line.split(":")[1]) < 3600) for line in sent_today):
                 continue
 
-            valid, spike = analyze_coin(symbol)
+            valid, spike = analyze_okx(symbol)
             if valid:
-                msg = (f"🌟 *4H TREND ONAYLI HACİM PATLAMASI*\n\n"
-                       f"🪙 *Coin:* {symbol.replace('USDT', '')}\n"
-                       f"📊 *1s Hacim Artışı:* %{spike}\n"
-                       f"📈 *Fiyat:* {coin.get('lastPrice')} USDT\n"
-                       f"🛡 *4H Trend:* Pozitif (EMA20 + MACD)\n\n"
-                       f"🔗 [Binance Grafiği](https://www.binance.com/en/trade/{symbol.replace('USDT', '_USDT')})")
+                msg = (f"💎 *OKX TREND & HACİM ALARMI*\n\n"
+                       f"🪙 *Coin:* {symbol.replace('-USDT', '')}\n"
+                       f"📊 *1s Hacim Patlaması:* %{spike}\n"
+                       f"🛡 *4H Trend:* Pozitif ✅\n"
+                       f"💰 *24s Hacim:* {vol_24h:,.0f} USDT\n\n"
+                       f"🔗 [OKX Grafiği](https://www.okx.com/market/chart/spot/{symbol.lower()})")
                 
                 send_tg(msg)
                 with open(MEMORY_FILE, "a") as f:
                     f.write(f"{symbol}:{time.time()}\n")
+            
+            # API'yi yormamak için kısa bir bekleme
+            time.sleep(0.1)
                     
     except Exception as e:
-        print(f"Genel Hata: {e}")
+        print(f"Hata: {e}")
 
 if __name__ == "__main__":
     scan()

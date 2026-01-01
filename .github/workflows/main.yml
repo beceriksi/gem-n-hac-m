@@ -9,7 +9,6 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     
-    # Hafızanın (Cache) bozulmaması için izinleri veriyoruz
     permissions:
       contents: write
 
@@ -21,7 +20,6 @@ jobs:
         uses: actions/cache@v3
         with:
           path: sent_coins.txt
-          # Her gün için yeni bir cache anahtarı oluşturur
           key: volume-memory-${{ github.run_id }}
           restore-keys: |
             volume-memory-
@@ -33,7 +31,8 @@ jobs:
 
       - name: Kütüphaneleri Yükle
         run: |
-          pip install requests
+          python -m pip install --upgrade pip
+          pip install requests pandas
 
       - name: Botu Calistir
         env:
